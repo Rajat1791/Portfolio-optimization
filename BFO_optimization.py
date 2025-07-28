@@ -47,72 +47,106 @@ print(f"Optimal Sharpe Ratio: {optimal_sharpe}")
 print(f"Expected Annual Return (%): {optimal_return * 100}")
 print(f"Annual Volatility (%): {optimal_volatility * 100}")
 
+Revised BFO code
+
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
-# Assuming df is your price DataFrame with assets as columns and dates as index
-# Adjusted Close prices only
-window_train = 252  # 1 year
-window_test = 21    # 1 month
+# Define tickers
+tickers = ["AAPL", "GOOGL", "MSFT", "AMZN", "PSX", "BRK-B", "JNJ", "V", "PG", "JPM",
+           "UNH", "INTC", "VZ", "HD", "T", "BAC", "MA", "COP", "PFE", "MRK",
+           "NFLX", "WMT", "PEP", "KO", "CSCO", "CMCSA", "XOM", "ABT", "NVDA", "CVX",
+           "PYPL", "ORCL", "ACN", "ADBE", "GILD", "NKE", "LLY", "IBM", "TXN", "LMT",
+           "NEE", "HON", "BMY", "SLB", "AMGN", "CAT", "TGT", "AMT", "QCOM", "UNP", "GE"]
+
+# Download price data
+raw_data = yf.download(tickers, start="2017-12-01", end="2025-07-01")['Adj Close']
+returns = raw_data.pct_change().dropna()
+
+# Define market regimes
+periods = {
+    "Pre-COVID": ("2018-01-01", "2019-12-31"),
+    "COVID": ("2020-01-01", "2020-12-31"),
+    "Post-COVID": ("2021-01-01", "2022-12-31"),
+    "Recent": ("2023-01-01", "2025-07-01"),
+    "Overall": ("2018-01-01", "2025-07-01")
+}
+
+# Parameters
 risk_free_rate = 0.01
+transaction_cost = 0.001
+pop_size = 50
+max_iter = 100
 
-returns = data.pct_change().dropna()
-dates = returns.index
-n_assets = returns.shape[1]
+# Sharpe Ratio function with transaction cost penalty
+def objective(weights, mean_returns, cov_matrix, prev_weights):
+    port_ret = np.dot(weights, mean_returns)
+    port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    sharpe = (port_ret - risk_free_rate) / port_vol if port_vol != 0 else 0
+    tc = transaction_cost * np.sum(np.abs(weights - prev_weights)) if prev_weights is not None else 0
+    return -(sharpe - tc)
 
-def sharpe_ratio(weights, mean_returns, cov_matrix):
-    port_return = np.dot(weights, mean_returns)
-    port_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
-    return (port_return - risk_free_rate) / port_volatility
+# BFO Optimizer
+def bfo_optimize(mean_returns, cov_matrix, prev_weights, pop_size=50, max_iter=100):
+    n = len(mean_returns)
+    pop = np.random.dirichlet(np.ones(n), size=pop_size)
 
-def objective_function(weights, mean_returns, cov_matrix):
-    return -sharpe_ratio(weights, mean_returns, cov_matrix)
+    for _ in range(max_iter):
+        for i in range(pop_size):
+            weights = pop[i]
+            perturb = np.random.normal(0, 0.01, n)
+            new_weights = np.clip(weights + perturb, 0, 1)
+            new_weights /= new_weights.sum()
 
-def bfo_optimize(mean_returns, cov_matrix, population_size=50, max_iterations=100):
-    dimensions = len(mean_returns)
-    population = np.random.dirichlet(np.ones(dimensions), size=population_size)
-    for _ in range(max_iterations):
-        for i in range(population_size):
-            weights = population[i]
-            perturbations = np.random.normal(0, 0.01, dimensions)
-            new_weights = weights + perturbations
-            new_weights = np.clip(new_weights, 0, 1)
-            new_weights /= np.sum(new_weights)
-            if objective_function(new_weights, mean_returns, cov_matrix) < objective_function(weights, mean_returns, cov_matrix):
-                population[i] = new_weights
-    best_idx = np.argmin([objective_function(w, mean_returns, cov_matrix) for w in population])
-    return population[best_idx]
+            if objective(new_weights, mean_returns, cov_matrix, prev_weights) < objective(weights, mean_returns, cov_matrix, prev_weights):
+                pop[i] = new_weights
 
-# Store validation results
+    scores = [objective(w, mean_returns, cov_matrix, prev_weights) for w in pop]
+    return pop[np.argmin(scores)]
+
+# Evaluation function
+def calculate_metrics(returns, weights):
+    port_ret = returns @ weights
+    ann_return = np.mean(port_ret) * 252
+    ann_vol = np.std(port_ret) * np.sqrt(252)
+    var_95 = np.percentile(port_ret, 5)
+    cvar_95 = np.mean(port_ret[port_ret <= var_95])
+    sharpe_ratio = (ann_return - risk_free_rate) / ann_vol if ann_vol != 0 else 0
+    return ann_return, ann_vol, -cvar_95, sharpe_ratio
+
+# Validate across regimes
 results = []
+prev_weights = None
+for label, (start, end) in periods.items():
+    data_slice = returns.loc[start:end]
+    mu = data_slice.mean() * 252
+    cov = data_slice.cov() * 252
+    weights = bfo_optimize(mu.values, cov.values, prev_weights, pop_size, max_iter)
+    ann_ret, ann_vol, cvar, sharpe = calculate_metrics(data_slice, weights)
+    results.append([label, round(ann_ret, 4), round(ann_vol, 4), round(cvar, 4), round(sharpe, 4)])
+    prev_weights = weights  # update for next period
 
-for start in range(0, len(returns) - window_train - window_test, window_test):
-    train_data = returns.iloc[start:start + window_train]
-    test_data = returns.iloc[start + window_train:start + window_train + window_test]
+# Display result
+df_results = pd.DataFrame(results, columns=["Period", "Ann.Return", "Ann.Vol", "CVaR(95%)", "Sharpe"])
+print(df_results)
+import matplotlib.pyplot as plt
 
-    mean_returns_train = train_data.mean() * 252
-    cov_matrix_train = train_data.cov() * 252
+# Plot settings
+metrics = ["Ann.Return", "Ann.Vol", "CVaR(95%)", "Sharpe"]
+x = np.arange(len(df_results["Period"]))
+width = 0.2
 
-    # Optimize weights using BFO
-    weights = bfo_optimize(mean_returns_train.values, cov_matrix_train.values)
+fig, ax = plt.subplots(figsize=(12, 6))
+for i, metric in enumerate(metrics):
+    ax.bar(x + i*width, df_results[metric], width, label=metric)
 
-    # Test portfolio on unseen data
-    test_portfolio_returns = test_data @ weights
-    cumulative_return = (1 + test_portfolio_returns).prod() - 1
-    annualized_return = cumulative_return * (252 / window_test)
-    volatility = test_portfolio_returns.std() * np.sqrt(252)
-    sharpe = (annualized_return - risk_free_rate) / volatility
-
-    results.append({
-        "start_date": dates[start + window_train],
-        "end_date": dates[start + window_train + window_test - 1],
-        "annualized_return": annualized_return,
-        "volatility": volatility,
-        "sharpe_ratio": sharpe
-    })
-
-# Convert to DataFrame
-validation_df = pd.DataFrame(results)
-
-# Summary stats
-print(validation_df.describe())
+# Aesthetics
+ax.set_title("Portfolio Performance Across Market Regimes (BFO with Transaction Cost)", fontsize=14)
+ax.set_xticks(x + width * 1.5)
+ax.set_xticklabels(df_results["Period"], rotation=45)
+ax.set_ylabel("Metric Value")
+ax.legend()
+ax.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
