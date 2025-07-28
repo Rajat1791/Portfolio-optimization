@@ -63,34 +63,115 @@ print(f"Optimal Sharpe Ratio: {optimal_sharpe}")
 print(f"Expected Annual Return (%): {optimal_return * 100}")
 print(f"Annual Volatility (%): {optimal_volatility * 100}")
 
-rolling_results = []
-window_train = 252
-window_test = 21
+Revised BAT code
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+# Parameters
+risk_free_rate = 0.01
+transaction_cost = 0.001
+alpha = 0.9  # Loudness
+gamma = 0.9  # Pulse rate
+fmin, fmax = 0, 2
+
+# Download data
+tickers = ["AAPL", "GOOGL", "MSFT", "AMZN", "PSX", "BRK-B", "JNJ", "V", "PG", "JPM",
+           "UNH", "INTC", "VZ", "HD", "T", "BAC", "MA", "COP", "PFE", "MRK",
+           "NFLX", "WMT", "PEP", "KO", "CSCO", "CMCSA", "XOM", "ABT", "NVDA", "CVX",
+           "PYPL", "ORCL", "ACN", "ADBE", "GILD", "NKE", "LLY", "IBM", "TXN", "LMT",
+           "NEE", "HON", "BMY", "SLB", "AMGN", "CAT", "TGT", "AMT", "QCOM", "UNP", "GE"]
+
+data = yf.download(tickers, start="2017-12-01", end="2025-07-01")['Adj Close']
 returns = data.pct_change().dropna()
-dates = returns.index
+annual_returns = returns.mean() * 252
+annual_cov_matrix = returns.cov() * 252
 
-for start in range(0, len(returns) - window_train - window_test, window_test):
-    train = returns.iloc[start:start + window_train]
-    test = returns.iloc[start + window_train:start + window_train + window_test]
+# Objective
+def objective(weights, mean_returns, cov_matrix, prev_weights=None):
+    weights = np.clip(weights, 0, 1)
+    weights /= np.sum(weights)
+    port_return = np.dot(weights, mean_returns)
+    port_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+    tc_penalty = transaction_cost * np.sum(np.abs(weights - prev_weights)) if prev_weights is not None else 0
+    sharpe = (port_return - risk_free_rate) / port_volatility
+    return -sharpe + tc_penalty
 
-    mean_ret_train = train.mean() * 252
-    cov_train = train.cov() * 252
+# BAT Optimization
+def bat_optimize(mean_returns, cov_matrix, iterations=100, n_bats=30):
+    dim = len(mean_returns)
+    positions = np.random.dirichlet(np.ones(dim), size=n_bats)
+    velocities = np.zeros((n_bats, dim))
+    fitness = np.array([objective(w, mean_returns, cov_matrix) for w in positions])
+    best = positions[np.argmin(fitness)]
 
-    weights, ret, risk, sharpe = bat_algorithm(mean_ret_train.values, cov_train.values)
-    test_returns = test @ weights
-    cumulative_return = (1 + test_returns).prod() - 1
-    ann_return = cumulative_return * (252 / window_test)
-    ann_volatility = test_returns.std() * np.sqrt(252)
-    sharpe_ratio = (ann_return - RISK_FREE_RATE) / ann_volatility
+    for _ in range(iterations):
+        for i in range(n_bats):
+            freq = fmin + (fmax - fmin) * np.random.rand()
+            velocities[i] += (positions[i] - best) * freq
+            new = positions[i] + velocities[i]
+            new = np.clip(new, 0, 1)
+            new /= np.sum(new)
 
-    rolling_results.append({
-        'start_date': dates[start + window_train],
-        'end_date': dates[start + window_train + window_test - 1],
-        'annualized_return': ann_return,
-        'volatility': ann_volatility,
-        'sharpe_ratio': sharpe_ratio
-    })
+            if np.random.rand() > gamma:
+                epsilon = np.random.normal(0, 0.001, dim)
+                new = best + epsilon
+                new = np.clip(new, 0, 1)
+                new /= np.sum(new)
 
-bat_validation_df = pd.DataFrame(rolling_results)
-# Summary stats
-print(bat_validation_df.describe())
+            new_fit = objective(new, mean_returns, cov_matrix)
+            if new_fit < fitness[i] and np.random.rand() < alpha:
+                positions[i] = new
+                fitness[i] = new_fit
+                if new_fit < objective(best, mean_returns, cov_matrix):
+                    best = new
+    return best
+
+# Market Regimes
+regimes = {
+    "Pre-COVID": ("2018-01-01", "2019-12-31"),
+    "COVID": ("2020-01-01", "2020-12-31"),
+    "Post-COVID": ("2021-01-01", "2022-12-31"),
+    "Recent": ("2023-01-01", "2025-07-01"),
+    "Overall": ("2018-01-01", "2025-07-01")
+}
+
+results = []
+for label, (start, end) in regimes.items():
+    sub_data = returns.loc[start:end]
+    mu = sub_data.mean() * 252
+    cov = sub_data.cov() * 252
+    weights = bat_optimize(mu.values, cov.values)
+    ret = np.dot(weights, mu.values)
+    vol = np.sqrt(np.dot(weights.T, np.dot(cov.values, weights)))
+    sharpe = (ret - risk_free_rate) / vol
+    port_ret = sub_data @ weights
+    var_95 = np.percentile(port_ret, 5)
+    cvar_95 = np.mean(port_ret[port_ret <= var_95])
+    results.append([label, round(ret, 4), round(vol, 4), round(-cvar_95, 4), round(sharpe, 4)])
+
+# Show Results
+df = pd.DataFrame(results, columns=["Period", "Ann.Return", "Ann.Vol", "CVaR(95%)", "Sharpe"])
+print(df)
+
+import matplotlib.pyplot as plt
+
+# Plot settings
+metrics = ["Ann.Return", "Ann.Vol", "CVaR(95%)", "Sharpe"]
+x = np.arange(len(df["Period"]))
+width = 0.2
+
+fig, ax = plt.subplots(figsize=(12, 6))
+for i, metric in enumerate(metrics):
+    ax.bar(x + i*width, df[metric], width, label=metric)
+
+# Aesthetics
+ax.set_title("Portfolio Performance Across Market Regimes (BAT with Transaction Cost)", fontsize=14)
+ax.set_xticks(x + width * 1.5)
+ax.set_xticklabels(df["Period"], rotation=45)
+ax.set_ylabel("Metric Value")
+ax.legend()
+ax.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
