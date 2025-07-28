@@ -52,59 +52,113 @@ print(f"Optimal Sharpe Ratio: {optimal_sharpe}")
 print(f"Expected Annual Return (%): {optimal_return * 100}")
 print(f"Annual Volatility (%): {optimal_volatility * 100}")
 
-window_train = 252  # 1 year
-window_test = 21    # 1 month
+Revised FWA code
+
+!pip install yfinance
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+
+# Constants
+RISK_FREE_RATE = 0.01
+TC = 0.001
+DIMENSIONS = 51
+POP_SIZE = 20
+ITERATIONS = 50
+np.random.seed(42)
+
+# Load data
+tickers = ["AAPL", "GOOGL", "MSFT", "AMZN", "PSX", "BRK-B", "JNJ", "V", "PG", "JPM",
+           "UNH", "INTC", "VZ", "HD", "T", "BAC", "MA", "COP", "PFE", "MRK",
+           "NFLX", "WMT", "PEP", "KO", "CSCO", "CMCSA", "XOM", "ABT", "NVDA", "CVX",
+           "PYPL", "ORCL", "ACN", "ADBE", "GILD", "NKE", "LLY", "IBM", "TXN", "LMT",
+           "NEE", "HON", "BMY", "SLB", "AMGN", "CAT", "TGT", "AMT", "QCOM", "UNP", "GE"]
+
+data = yf.download(tickers, start="2017-12-01", end="2025-07-01")['Adj Close']
 returns = data.pct_change().dropna()
-dates = returns.index
 
-def fireworks_algorithm(mean_returns, cov_matrix, population_size=50, m=50, a=0.04, b=0.8, max_generations=100):
-    dimensions = len(mean_returns)
-    population = np.random.dirichlet(np.ones(dimensions), size=population_size)
+# Define regimes
+regimes = {
+    "Pre-COVID": ("2018-01-01", "2019-12-31"),
+    "COVID": ("2020-01-01", "2020-12-31"),
+    "Post-COVID": ("2021-01-01", "2022-12-31"),
+    "Recent": ("2023-01-01", "2025-07-01"),
+    "Overall": ("2018-01-01", "2025-07-01")
+}
 
-    for generation in range(max_generations):
-        for i in range(population_size):
-            base_firework = population[i]
-            sparks = []
-            num_sparks = int(m * (1 - a + a * (generation / max_generations)))
-            amplitudes = b * (1 - generation / max_generations)
+# Objective function
+def objective(w, mu, cov, prev_w=None):
+    w = np.clip(w, 0, 1)
+    w /= np.sum(w)
+    ret = np.dot(w, mu)
+    vol = np.sqrt(np.dot(w.T, np.dot(cov, w)))
+    tc_penalty = TC * np.sum(np.abs(w - prev_w)) if prev_w is not None else 0
+    return -((ret - RISK_FREE_RATE) / vol - tc_penalty)
 
-            for _ in range(num_sparks):
-                spark = base_firework + np.random.normal(0, amplitudes, dimensions)
+# Lightweight Fireworks Algorithm
+def fireworks_optimize(mu, cov, prev_w=None):
+    pop = np.random.dirichlet(np.ones(DIMENSIONS), size=POP_SIZE)
+    best_w = None
+    best_fitness = float('inf')
+
+    for _ in range(ITERATIONS):
+        new_pop = []
+        for w in pop:
+            w = np.clip(w, 0, 1)
+            w /= np.sum(w)
+            f = objective(w, mu, cov, prev_w)
+            if f < best_fitness:
+                best_fitness = f
+                best_w = w
+            # 3 sparks per candidate
+            for _ in range(3):
+                spark = w + np.random.normal(0, 0.02, DIMENSIONS)
                 spark = np.clip(spark, 0, 1)
                 spark /= np.sum(spark)
-                sparks.append(spark)
+                new_pop.append(spark)
+        pop = np.array(new_pop[:POP_SIZE])  # Truncate to fixed size
+    return best_w
 
-            best_spark = min(sparks, key=lambda x: objective_function(x, mean_returns, cov_matrix))
-            if objective_function(best_spark, mean_returns, cov_matrix) < objective_function(base_firework, mean_returns, cov_matrix):
-                population[i] = best_spark
+# Metrics
+def get_metrics(ret, w):
+    port_ret = ret @ w
+    ann_ret = port_ret.mean() * 252
+    ann_vol = port_ret.std() * np.sqrt(252)
+    cvar = -np.mean(port_ret[port_ret <= np.percentile(port_ret, 5)])
+    sharpe = (ann_ret - RISK_FREE_RATE) / ann_vol
+    return round(ann_ret, 4), round(ann_vol, 4), round(cvar, 4), round(sharpe, 4)
 
-    best_idx = np.argmin([objective_function(w, mean_returns, cov_matrix) for w in population])
-    return population[best_idx]
+# Run validation
+results = []
+for regime, (start, end) in regimes.items():
+    r = returns.loc[start:end]
+    mu = r.mean().values * 252
+    cov = r.cov().values * 252
+    w = fireworks_optimize(mu, cov)
+    metrics = get_metrics(r, w)
+    results.append([regime] + list(metrics))
 
-fwa_results = []
+# Output
+df_fwa = pd.DataFrame(results, columns=["Period", "Ann.Return", "Ann.Vol", "CVaR(95%)", "Sharpe"])
+print(df_fwa)
+import matplotlib.pyplot as plt
 
-for start in range(0, len(returns) - window_train - window_test, window_test):
-    train_data = returns.iloc[start:start + window_train]
-    test_data = returns.iloc[start + window_train:start + window_train + window_test]
+# Plot settings
+metrics = ["Ann.Return", "Ann.Vol", "CVaR(95%)", "Sharpe"]
+x = np.arange(len(df_fwa["Period"]))
+width = 0.2
 
-    mean_returns_train = train_data.mean() * 252
-    cov_matrix_train = train_data.cov() * 252
+fig, ax = plt.subplots(figsize=(12, 6))
+for i, metric in enumerate(metrics):
+    ax.bar(x + i*width, df_fwa[metric], width, label=metric)
 
-    weights = fireworks_algorithm(mean_returns_train.values, cov_matrix_train.values)
-
-    test_portfolio_returns = test_data @ weights
-    cumulative_return = (1 + test_portfolio_returns).prod() - 1
-    annualized_return = cumulative_return * (252 / window_test)
-    volatility = test_portfolio_returns.std() * np.sqrt(252)
-    sharpe = (annualized_return - RISK_FREE_RATE) / volatility
-
-    fwa_results.append({
-        "start_date": dates[start + window_train],
-        "end_date": dates[start + window_train + window_test - 1],
-        "annualized_return": annualized_return,
-        "volatility": volatility,
-        "sharpe_ratio": sharpe
-    })
-
-# Convert to DataFrame
-fwa_validation_df = pd.DataFrame(fwa_results)
+# Aesthetics
+ax.set_title("Portfolio Performance Across Market Regimes (FWA with Transaction Cost)", fontsize=14)
+ax.set_xticks(x + width * 1.5)
+ax.set_xticklabels(df_fwa["Period"], rotation=45)
+ax.set_ylabel("Metric Value")
+ax.legend()
+ax.grid(True, linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
